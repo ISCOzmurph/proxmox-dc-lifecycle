@@ -20,7 +20,7 @@ wiminfo /tmp/srviso/sources/install.wim
 For Server 2025 Eval: **1=StandardCore, 2=Standard+Desktop, 3=DatacenterCore, 4=Datacenter+Desktop**. Use the **index** for `/IMAGE/INDEX` in the unattend — selecting by NAME is error-prone (a mismatch silently defaults to Datacenter). NOTE: on some eval media Setup defaults to Datacenter even with a correct INDEX (an `ei.cfg`/`ImageInstall` quirk) — for a DC the edition is functionally irrelevant (Datacenter is a superset), so verify after install with `(Get-WindowsEdition -Online).Edition` + the `InstallationType` reg key (`Server Core` vs `Server`) and accept Datacenter Core if that's what landed. See gotchas.
 
 ## 3. Confirm virtio driver paths
-Mount `virtio-win-*.iso` and verify `viostor/2k25/amd64`, `vioscsi/2k25/amd64`, `NetKVM/2k25/amd64` exist (use the folder matching your Server version). The unattend template references drive `E:` for these — make sure the virtio ISO ends up as the drive letter the template expects (or edit the paths).
+Mount `virtio-win-*.iso` and verify `viostor/2k25/amd64`, `vioscsi/2k25/amd64`, `NetKVM/2k25/amd64` and `guest-agent/qemu-ga-x86_64.msi` exist (use the folder matching your Server version). The unattend template references drive `E:` for these — make sure the virtio ISO ends up as the drive letter the template expects (or edit the paths).
 
 ## 4. Build the unattend ISO
 Fill `assets/autounattend.xml.template` placeholders (image INDEX, computer name, IP/CIDR, gateway, DNS, domain, timezone, admin password) → `autounattend.xml`, then:
