@@ -15,7 +15,9 @@
     __ADMINPW__      local Administrator password (this file is transient; delete the ISO after install)
   DriverPaths assume the virtio-win ISO mounts as E:. Adjust if Setup assigns a different letter,
   and the 2k25 folder to match your Server version.
-  The boot disk here is virtio0 (viostor). vioscsi included for a scsi-on-virtio-scsi disk.
+  The boot disk here is virtio0 (viostor). vioscsi included for a scsi-on-virtio-scsi disk
+  (the VMware-source shell in references/vmware-source.md uses scsi0).
+  The guest agent is installed from E:\guest-agent\qemu-ga-x86_64.msi at first logon.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <settings pass="windowsPE">
@@ -103,10 +105,12 @@
         <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
       <FirstLogonCommands>
-        <SynchronousCommand wcm:action="add"><Order>1</Order><Description>Enable QEMU guest agent</Description><CommandLine>cmd /c sc config QEMU-GA start= auto &amp; net start QEMU-GA</CommandLine></SynchronousCommand>
-        <SynchronousCommand wcm:action="add"><Order>2</Order><Description>Enable WinRM</Description><CommandLine>powershell -NoProfile -Command "Enable-PSRemoting -Force"</CommandLine></SynchronousCommand>
+        <!-- A fresh install has no guest agent; install it from the virtio-win ISO (same E: assumption as DriverPaths). -->
+        <SynchronousCommand wcm:action="add"><Order>1</Order><Description>Install QEMU guest agent</Description><CommandLine>msiexec /i E:\guest-agent\qemu-ga-x86_64.msi /qn /norestart</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>2</Order><Description>Enable QEMU guest agent</Description><CommandLine>cmd /c sc config QEMU-GA start= auto &amp; net start QEMU-GA</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>3</Order><Description>Enable WinRM</Description><CommandLine>powershell -NoProfile -Command "Enable-PSRemoting -Force"</CommandLine></SynchronousCommand>
         <!-- Secondary completion hint. The authoritative signal is the ImageState reg key = IMAGE_STATE_COMPLETE; this marker is best-effort (cmd redirects in FirstLogonCommands can misfire). -->
-        <SynchronousCommand wcm:action="add"><Order>3</Order><Description>Completion marker</Description><CommandLine>powershell -NoProfile -Command "Set-Content -Path C:\oobe_done.txt -Value OOBE_DONE"</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>4</Order><Description>Completion marker</Description><CommandLine>powershell -NoProfile -Command "Set-Content -Path C:\oobe_done.txt -Value OOBE_DONE"</CommandLine></SynchronousCommand>
       </FirstLogonCommands>
     </component>
     <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">

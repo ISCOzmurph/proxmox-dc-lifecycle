@@ -7,8 +7,10 @@ description: >-
   Proxmox-hosted DC rebuild requests and symptoms that point to rebuild: NTDS
   will not start, ntds.dit is missing, promotion fails with trust-relationship or
   "no computer account" errors, demotion hangs, dcdiag/replication fails on one
-  DC, or a broken DC VM needs to come back. Also use for Windows AD operations
-  through QEMU guest agent (qm guest exec). Rule: do not corrupt Active
+  DC, or a broken DC VM needs to come back. Also use to move a DC off VMware by
+  demoting it there and rebuilding it as a new Proxmox VM with the same name and
+  IP, including domains that enforce AuthLite 2FA on DCs. Also use for Windows
+  AD operations through QEMU guest agent (qm guest exec). Rule: do not corrupt Active
   Directory; verify replication and FSMO before and after every lifecycle step,
   change one DC at a time, and never destroy or recreate a VM while AD still has
   NTDS Settings for that DC.
@@ -17,6 +19,12 @@ description: >-
 # Proxmox DC Lifecycle
 
 Rebuild a domain controller that lives as a VM on a Proxmox hypervisor, one DC at a time, without corrupting Active Directory. This skill was distilled from production DC rebuilds; the flow rebuilds any additional (non-last) DC.
+
+The DC can start on either platform:
+- **Proxmox source** — the DC is already a Proxmox VM; the OS is reinstalled onto the same VM (same VMID/MAC/disk).
+- **VMware source** — the DC lives on ESXi/vCenter. It is demoted there, the VMware VM is retired, and a **new** Proxmox VM is built and promoted with the same name and IP. No disks are copied. Source-side steps run at the VMware console as the breakglass account; see `references/vmware-source.md`.
+
+If the domain enforces AuthLite 2FA on DCs, also follow `references/authlite.md`: every credentialed step uses the breakglass account, and the new DC gets AuthLite before it is in service.
 
 ## The prime directive
 
@@ -27,6 +35,7 @@ Rebuild a domain controller that lives as a VM on a Proxmox hypervisor, one DC a
 - **Never destroy/recreate the VM while AD still sees it as a DC.** "AD sees it as a DC" = an `nTDSDSA` (NTDS Settings) object exists for it under `CN=Sites`. That object's *absence* — not the VM being off, not the computer object being gone — is the gate that unlocks the OS rebuild.
 - **Snapshot the VM before destructive steps.** `qm snapshot <vmid> <label>` is seconds of cost and the only instant rollback.
 - **Target only additional DCs.** This flow assumes the DC being rebuilt is NOT the last DC in the domain and holds NO FSMO roles. If it holds FSMO, transfer them to a healthy DC first. If it's the last DC, this is a different (restore-from-backup) procedure — stop and reassess.
+- **One identity on the wire (VMware source).** The retired VMware VM must never boot with a connected NIC once its replacement exists, and a pre-demotion VMware snapshot must never be reverted after demotion has replicated.
 
 ## Environment config
 
@@ -41,9 +50,14 @@ All environment-specific values live here, in one place. **Fill this in for YOUR
   "fsmoHolder":    "DC1",                 // holds all 5 FSMO; NEVER the rebuild target
   "dcs": [
     { "name": "DC1", "vmid": 0, "ip": "10.0.0.10" },   // authority / DNS
-    { "name": "DC2", "vmid": 0, "ip": "10.0.0.20" }
-    // ...one entry per DC; rebuild one at a time
+    { "name": "DC2", "vmid": 0, "ip": "10.0.0.20" },
+    { "name": "DC3", "vmid": null, "ip": "10.0.0.30",  // VMware source: vmid assigned when the Proxmox VM is created
+      "source": "vmware", "vmwareVm": "DC3", "vmwareHost": "esxi01.example.local", "vmwareVlan": 10 }
+    // ...one entry per DC; rebuild one at a time. "source" defaults to "proxmox".
   ],
+  "vmStorage":     "local-zfs",            // VMware source: where the new VM's disks go
+  "breakglassAccount": "EXAMPLE\\breakglass", // credentialed steps in an AuthLite domain; value never stored here
+  "authlite":      false,                  // true if DCs enforce AuthLite 2FA (references/authlite.md)
   "primaryDns":    "10.0.0.10",           // a healthy DC; the new DC points here during build
   "bridge":        "vmbr0",
   "vlanTag":       0,                      // 0 / omit if untagged
@@ -69,8 +83,12 @@ Work the phases below top to bottom. Each phase ends with a verification gate. *
 3. Capture the baseline from the FSMO holder: FSMO roles, `repadmin /replsummary`, each DC's SYSVOL/NETLOGON shares and DFSR state. See `references/verification.md` for exact commands.
 4. **Gate:** replication shows `0 fails`, FSMO are where you expect, the target DC holds none. Record this — it's your "known good."
 
+**VMware source:** steps 1–3 apply to the surviving Proxmox DCs only (if any DC is still on VMware, run its checks at its console). Also inventory the source VM and guest (`vmware-source.md` V0), plan the outage window for its IP (V1), and if `authlite` is true, test a breakglass logon on the source and on a surviving DC (`authlite.md`).
+
 ### Phase 1 — Snapshot the target
 `sudo qm snapshot <vmid> predemote_<date> --description "..."`. Confirm with `qm listsnapshot <vmid>`.
+
+**VMware source:** a pre-demotion VMware snapshot is optional and only good until demotion replicates — see `vmware-source.md` V2.
 
 ### Phase 2 — Demote the target DC
 Run the demotion **locally inside the target guest** via QGA (NOT remoting from another DC). See `references/demotion.md` for the script and the two gotchas that will otherwise hang or fail it:
@@ -78,6 +96,8 @@ Run the demotion **locally inside the target guest** via QGA (NOT remoting from 
 - supply `-RemoveDnsDelegation:$false` when the parent DNS zone is on external nameservers (Cloudflare, etc.) you don't manage via Windows DNS — otherwise it stalls for minutes on RPC timeouts trying to delete a delegation it can't reach.
 
 If graceful demotion is genuinely impossible, fall back to forced removal + metadata cleanup — but only after intentionally taking the DC offline. See `references/demotion.md`.
+
+**VMware source:** there is no QGA; run the same cmdlet interactively at the VMware console as the breakglass account (`vmware-source.md` V3). No scheduled task is needed for an interactive logon.
 
 **Gate:** from a surviving DC, the target no longer appears in `Get-ADDomainController`, and replication among the remaining DCs is still `0 fails`.
 
@@ -88,7 +108,11 @@ Then run the full health verification (`repadmin /replsummary`, `dcdiag` on the 
 
 **Gate (this is the big one):** No `nTDSDSA` for the target anywhere. `Get-ADDomainController` lists only the surviving DCs (the target is absent). Replication `0 fails`. **Only now may you touch the VM's disk.**
 
+**VMware source:** once this gate is green, retire the VMware VM — shut down, disconnect its NICs at power-on, disable autostart, pull it from backups, rename it (`vmware-source.md` V4). It stays powered off, not deleted, until the new DC has been healthy for a while.
+
 ### Phase 4 — Reinstall the OS (hands-off)
+**VMware source:** there is no existing Proxmox VM. Create a new shell per `vmware-source.md` V5 (q35, OVMF, VirtIO SCSI `scsi0`, virtio NIC on the right bridge/VLAN, guest agent on), then follow steps 2–4 below with `scsi0` in place of `virtio0`. Nothing to wipe, but still confirm the VMID.
+
 Keep the same VMID, MAC, and disk — reinstall *onto* the existing VM, don't recreate it (that's how MAC/IP/config are preserved).
 
 > **The disk wipe is irreversible — gate it.** Step 3 wipes the boot disk. Before running it: confirm the Phase-3 gate is green (no `nTDSDSA` for this DC anywhere — AD does not see it as a DC), confirm the `<vmid>` is the intended target and nothing else, and **get explicit operator confirmation to wipe that specific VM**. Never wipe while AD still sees the box as a DC, and never run this step unattended.
@@ -101,10 +125,16 @@ Keep the same VMID, MAC, and disk — reinstall *onto* the existing VM, don't re
 ### Phase 5 — Join & promote
 Install AD DS role, then `Install-ADDSDomainController` (replica) against the domain, supplying domain creds + DSRM password. Establish a trusted computer account first (see `promotion.md` §0). Point the new DC's DNS at a healthy DC during promotion; after it's a DC, set DNS to itself + a partner. Full script in `references/promotion.md`.
 
-**Gate:** new DC appears in `Get-ADDomainController` with an `nTDSDSA` object, `repadmin /replsummary` is `0 fails` including the new DC in both directions, SYSVOL/NETLOGON shared, `dcdiag` clean (modulo transient DFSR-initial-sync and SystemLog churn). Re-confirm FSMO unchanged.
+**VMware source:** the kept computer object has never seen this install's secret, so do an explicit `Add-Computer` domain join and reboot **before** promoting, and match the source's site and Global Catalog setting (`vmware-source.md` V6).
+
+**AuthLite:** pass the breakglass account as the credential, and get AuthLite onto the new DC before it serves logons — ideally installed on the joined member server before promotion (`authlite.md`).
+
+**Gate:** new DC appears in `Get-ADDomainController` with an `nTDSDSA` object, `repadmin /replsummary` is `0 fails` including the new DC in both directions, SYSVOL/NETLOGON shared, `dcdiag` clean (modulo transient DFSR-initial-sync and SystemLog churn). Re-confirm FSMO unchanged. If `authlite` is true: AuthLite installed on the new DC and a one-factor logon against it is refused.
 
 ### Phase 6 — Finalize
 Detach install ISOs, set boot back to the disk, remove the unattend ISO and any temp cred files, hand off the throwaway local-admin/DSRM passwords to the operator, and (optionally) prune now-stale pre-rebuild snapshots once the new DC has been healthy for a while. Then — and only then — move to the next DC.
+
+**VMware source:** repoint monitoring/backups at the Proxmox VM, and after the agreed healthy period delete the retired VMware VM (`vmware-source.md` V7). **AuthLite:** rotate the breakglass password.
 
 ## Credential & secret handling
 
@@ -126,6 +156,8 @@ This skill makes real changes to a live directory. Stop and confirm with the use
 - `references/promotion.md` — establishing trust, AD DS role install + replica promotion + post-promotion DNS and verification.
 - `references/gotchas.md` — the catalog of failure modes seen in the field, each with its signature and fix. Skim it before starting and consult it the instant something hangs or errors.
 - `references/credential-handling.md` — what the skill does with secrets vs. what it must NOT pretend to do (no password manager on the host); the throwaway-random + hand-off model.
+- `references/vmware-source.md` — VMware-source variant: inventory, outage window, console demotion, retiring the VMware VM, creating the new Proxmox VM shell, join-before-promote.
+- `references/authlite.md` — AuthLite 2FA: which identity each step uses, breakglass requirements, and getting AuthLite onto the new DC before it is in service.
 - `assets/autounattend.xml.template` — parameterized Windows Server Core unattend (UEFI/GPT, virtio injection, static IP, agent+WinRM).
 - `scripts/run-guest-ps.sh` — wrapper that runs base64'd PowerShell in a guest via QGA, with stdin secret passing.
 - `scripts/build-unattend-iso.sh` — packages an autounattend.xml into an attachable ISO.

@@ -2,6 +2,8 @@
 
 Safely rebuild a Windows Active Directory **domain controller** that lives as a Proxmox VM — demote it, clean its metadata, reinstall the OS hands-off, and re-promote it — without corrupting Active Directory. Built from real DC rebuilds, with the failure modes that bit along the way written down.
 
+This fork adds a **VMware source**: demote a DC on ESXi/vCenter, retire the VMware VM, and rebuild it as a new Proxmox VM with the same name and IP — plus guidance for domains that enforce **AuthLite** 2FA on DCs (breakglass account for credentialed steps, AuthLite on the new DC before it is in service). No disks are copied; it is always a rebuild.
+
 Works standalone as an operational runbook, or as a knowledge base for AI coding agents (Claude Code, Claude Desktop, OpenClaw, Cursor, etc).
 
 > **Prime directive: do not corrupt Active Directory.** Verify replication and FSMO before and after every step, rebuild one DC at a time, and never destroy a VM while AD still sees it as a domain controller.
@@ -38,6 +40,8 @@ Phase 5  Rejoin & re-promote             → replica DC; repl 0 fails incl. new 
 Phase 6  Finalize                        → detach media, clean up, then the next DC
 ```
 
+For a VMware-source DC the same phases apply with these changes: inventory the VMware VM in Phase 0, demote at the VMware console as breakglass in Phase 2, retire the VMware VM after the Phase 3 gate, create a new Proxmox VM shell in Phase 4, and domain-join before promoting in Phase 5. See `references/vmware-source.md`.
+
 Each phase has an explicit **gate** — do not proceed until it's green. See `SKILL.md` for the full flow and `references/` for the per-step scripts.
 
 ## Files
@@ -53,6 +57,8 @@ Each phase has an explicit **gate** — do not proceed until it's green. See `SK
 | `references/promotion.md` | AD DS role install + replica promotion + post-promotion DNS & verification |
 | `references/gotchas.md` | Catalog of field-tested failure modes, each with signature + fix |
 | `references/credential-handling.md` | What the skill does with secrets vs. what it must not pretend to do |
+| `references/vmware-source.md` | VMware-source variant: inventory, console demotion, retiring the VMware VM, new Proxmox VM shell, join-before-promote |
+| `references/authlite.md` | AuthLite 2FA: identity per step, breakglass requirements, AuthLite on the new DC |
 | `assets/autounattend.xml.template` | Parameterized Server Core unattend (UEFI/GPT, virtio, static IP) |
 | `scripts/run-guest-ps.sh` | Run base64'd PowerShell in a guest via QGA, secrets over stdin |
 | `scripts/build-unattend-iso.sh` | Package an autounattend.xml into an attachable ISO |
@@ -64,7 +70,7 @@ Plain markdown + shell — no framework lock-in.
 ### Claude Code
 
 ```bash
-git clone https://github.com/eddygk/proxmox-dc-lifecycle.git proxmox-dc-lifecycle
+git clone https://github.com/ISCOzmurph/proxmox-dc-lifecycle.git proxmox-dc-lifecycle
 echo "For Windows AD domain-controller rebuilds on Proxmox, read proxmox-dc-lifecycle/SKILL.md and its references/." >> CLAUDE.md
 ```
 
